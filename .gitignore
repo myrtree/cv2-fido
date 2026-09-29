@@ -1,0 +1,4 @@
+/cv2-fido
+/*.test
+/coverage.out
+/dist/

@@ -1,0 +1,41 @@
+[Unit]
+Description=Fingerprint FIDO2 authenticator
+After=systemd-udevd.service fprintd.service
+Wants=systemd-udevd.service
+
+[Service]
+Type=simple
+User=cv2-fido
+Group=cv2-fido
+EnvironmentFile=/etc/cv2-fido.conf
+ExecStart=/usr/bin/cv2-fido run
+StateDirectory=cv2-fido
+StateDirectoryMode=0700
+RuntimeDirectory=cv2-fido
+RuntimeDirectoryMode=0755
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+DeviceAllow=/dev/uhid rw
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+LockPersonality=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+    configure|abort-upgrade|abort-deconfigure|abort-remove)
+        if [ "${1:-}" = configure ]; then
+            # sysusers confines writes to the selected root, including chrootless
+            # dpkg --root installations. Accounts intentionally survive purge.
+            if [ -n "${DPKG_ROOT:-}" ] && [ "$DPKG_ROOT" != / ]; then
+                systemd-sysusers --root="$DPKG_ROOT" cv2-fido.conf
+            else
+                systemd-sysusers /usr/lib/sysusers.d/cv2-fido.conf
+            fi
+
+        fi
+        # Follow Debian helper semantics: first install follows preset; an
+        # administrator's prior disablement or mask remains effective.
+        if deb-systemd-helper --quiet was-enabled cv2-fido.service; then
+            deb-systemd-helper enable cv2-fido.service >/dev/null || true
+        else
+            deb-systemd-helper update-state cv2-fido.service >/dev/null || true
+        fi
+        ;;
+esac
+
+# A --root installation with --force-script-chrootless must not change the host.
+if [ -n "${DPKG_ROOT:-}" ] && [ "$DPKG_ROOT" != / ]; then exit 0; fi
+
+case "${1:-}" in
+    configure)
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload >/dev/null || true
+        fi
+        if [ -n "${2:-}" ]; then
+            deb-systemd-invoke try-restart cv2-fido.service >/dev/null || true
+        fi
+        echo 'cv2-fido: set CV2_FIDO_USER in /etc/cv2-fido.conf, add that owner to cv2-fido-users, then start the system service.'
+        echo 'cv2-fido: reboot before relying on new TPM/UHID device isolation; see package documentation.'
+        ;;
+esac
+exit 0

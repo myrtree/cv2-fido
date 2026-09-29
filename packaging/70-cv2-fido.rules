@@ -1,0 +1,4 @@
+# Browser access to the virtual FIDO device remains session-scoped.
+# HID names are parent uevent properties, not ATTRS{name} attributes.
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", IMPORT{parent}="HID_*"
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ENV{HID_NAME}=="cv2-fido", TAG+="uaccess"

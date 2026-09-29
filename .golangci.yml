@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  timeout: 5m
+  # Analyze integration helpers too; linting does not start swtpm or D-Bus.
+  build-tags: [integration]
+
+linters:
+  # Explicit selection keeps upgrades from silently enabling new style rules.
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - errorlint
+    - nilerr
+    - durationcheck
+    - copyloopvar
+    - bidichk
+    - nolintlint
+  settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    presets: []
+
+formatters:
+  # Preserve the project's hand-chosen blank lines.
+  enable: [gofmt]

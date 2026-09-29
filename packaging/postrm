@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = purge ] && command -v deb-systemd-helper >/dev/null 2>&1; then
+    # Remove only helper-managed enablement/state, not administrator masks.
+    deb-systemd-helper purge cv2-fido.service >/dev/null || true
+fi
+
+if [ -n "${DPKG_ROOT:-}" ] && [ "$DPKG_ROOT" != / ]; then exit 0; fi
+
+case "${1:-}" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload >/dev/null || true
+        fi
+        ;;
+esac
+
+# Device ACL changes require a reboot. Do not unload UHID or remove state,
+# or accounts.
+exit 0

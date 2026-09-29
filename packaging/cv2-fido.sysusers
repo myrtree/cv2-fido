@@ -1,0 +1,3 @@
+g cv2-fido -
+g cv2-fido-users -
+u cv2-fido - "cv2-fido authenticator" /var/lib/cv2-fido /usr/sbin/nologin

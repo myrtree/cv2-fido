@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = remove ] && { [ -z "${DPKG_ROOT:-}" ] || [ "$DPKG_ROOT" = / ]; }; then
+    # deb-systemd-invoke honors policy-rc.d. It stops only this system unit.
+    deb-systemd-invoke stop cv2-fido.service >/dev/null || true
+fi
+exit 0

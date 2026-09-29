@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=cv2-fido fingerprint notifications
+Comment=Show the site requesting a fingerprint before scanning
+Exec=/usr/bin/cv2-fido agent
+TryExec=/usr/bin/cv2-fido
+Terminal=false
+NoDisplay=true

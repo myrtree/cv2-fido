@@ -1,0 +1,5 @@
+# Run after 70-uaccess.rules and before 73-seat-late.rules applies ACLs.
+# The raw TPM node must also be inaccessible to desktop users.
+SUBSYSTEM=="misc", KERNEL=="uhid", TAG-="uaccess", OWNER="root", GROUP="cv2-fido", MODE="0660"
+SUBSYSTEM=="tpmrm", KERNEL=="tpmrm0", TAG-="uaccess", OWNER="root", GROUP="cv2-fido", MODE="0660"
+SUBSYSTEM=="tpm", KERNEL=="tpm0", TAG-="uaccess", OWNER="root", GROUP="root", MODE="0600"
