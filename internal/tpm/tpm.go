@@ -30,6 +30,9 @@ func (t *TPM) open() (io.ReadWriteCloser, error) {
 }
 
 func New(devicePath string) (*TPM, error) {
+	stop := watchdog(operationTimeout)
+	defer stop()
+
 	t := &TPM{
 		devicePath: devicePath,
 	}
@@ -87,6 +90,9 @@ func (t *TPM) RegisterKey(applicationParam []byte) ([]byte, *big.Int, *big.Int, 
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	stop := watchdog(operationTimeout)
+	defer stop()
 
 	tpm, err := t.open()
 	if err != nil {
@@ -146,6 +152,9 @@ func (t *TPM) SignASN1(keyHandle, applicationParam, digest []byte) ([]byte, erro
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	stop := watchdog(operationTimeout)
+	defer stop()
 
 	tpm, err := t.open()
 	if err != nil {

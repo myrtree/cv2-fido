@@ -5,8 +5,8 @@ package notification
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
-	"github.com/godbus/dbus/v5"
 	"net"
 	"os"
 	"os/exec"
@@ -14,10 +14,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 func TestBrokerIntegration(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "notify.sock")
+	path := filepath.Join(socketTestDirectory(t), "notify.sock")
 	b, err := Listen(path, uint32(os.Getuid()))
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +70,7 @@ func TestBrokerIntegration(t *testing.T) {
 }
 
 func TestBrokerRejectsWrongOwner(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "notify.sock")
+	path := filepath.Join(socketTestDirectory(t), "notify.sock")
 	b, err := Listen(path, uint32(os.Getuid())+1)
 	if err != nil {
 		t.Fatal(err)
@@ -87,16 +89,14 @@ func TestBrokerRejectsWrongOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var ack [1]byte
-	if _, err := conn.Read(ack[:]); err == nil {
-		t.Fatal("unauthorized helper connection accepted")
-	} else if errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatal("unauthorized helper was left connected")
+	var denial Request
+	if err := json.NewDecoder(conn).Decode(&denial); err != nil || denial.Action != actionOwnerDenied {
+		t.Fatal("missing explicit owner rejection", err)
 	}
 }
 
 func TestBrokerReplacesIdleHelper(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "notify.sock")
+	path := filepath.Join(socketTestDirectory(t), "notify.sock")
 	b, err := Listen(path, uint32(os.Getuid()))
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +205,7 @@ func TestLateDesktopNotificationIsClosed(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		cleanup, err := showDesktop(requestCtx, ctx, bus.Object(bus.Names()[0], "/test"), Request{RP: "example.com", Action: "authenticate"})
+		cleanup, err := showDesktop(requestCtx, ctx, bus.Object(bus.Names()[0], "/test"), Request{RP: "example.com", Action: "authenticate"}, notificationTimeout)
 		if cleanup != nil {
 			cleanup()
 		}
@@ -239,5 +239,24 @@ func TestLateDesktopNotificationIsClosed(t *testing.T) {
 		}
 	default:
 		t.Fatal("late notification left visible")
+	}
+}
+
+func TestRejectedAgentStops(t *testing.T) {
+	path := filepath.Join(socketTestDirectory(t), "notify.sock")
+	b, err := Listen(path, uint32(os.Getuid())+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer b.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = ServeAgent(ctx, path, uint32(os.Getuid()), func(context.Context, Request) (func(), error) {
+		t.Error("wrong owner received notification")
+		return func() {}, nil
+	})
+	if !errors.Is(err, errOwnerDenied) || ctx.Err() != nil {
+		t.Fatal("rejected agent kept retrying", err)
 	}
 }

@@ -15,6 +15,7 @@ const (
 	statusInvalidLength        = 0x03
 	statusChannelBusy          = 0x06
 	statusInvalidCBOR          = 0x12
+	statusMissingParameter     = 0x14
 	statusCredentialExcluded   = 0x19
 	statusUnsupportedAlgorithm = 0x26
 	statusOperationDenied      = 0x27
@@ -26,7 +27,7 @@ const (
 	statusUserActionTimeout    = 0x2f
 	statusPINAuthInvalid       = 0x33
 	statusRequestTooLarge      = 0x39
-	statusOther                = 0x7f
+	statusOther                = 0x7f // CTAP1_ERR_OTHER is also defined for CTAP2 responses.
 )
 
 // WebAuthn authenticator data flags; a silent probe has none of these bits set.
@@ -36,7 +37,27 @@ const (
 	flagAttestedCredentialData = 0x40
 )
 
-// Integer keys in CTAP response maps (request keys live in struct tags).
+// Integer request keys. Keep in sync with the request types' CBOR tags.
+const (
+	makeClientDataHash        = 0x01
+	makeRP                    = 0x02
+	makeUser                  = 0x03
+	makePubKeyCredParams      = 0x04
+	makeExcludeList           = 0x05
+	makeOptions               = 0x07
+	makePINAuth               = 0x08
+	makePINProtocol           = 0x09
+	makeEnterpriseAttestation = 0x0a
+
+	assertionRPID           = 0x01
+	assertionClientDataHash = 0x02
+	assertionAllowList      = 0x03
+	assertionOptions        = 0x05
+	assertionPINAuth        = 0x06
+	assertionPINProtocol    = 0x07
+)
+
+// Integer keys in CTAP response maps.
 const (
 	infoVersions   = 0x01
 	infoAAGUID     = 0x03

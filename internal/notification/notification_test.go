@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 func TestRequestText(t *testing.T) {
@@ -31,8 +33,9 @@ func TestRequestText(t *testing.T) {
 }
 
 func TestNotificationLifecycle(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		t.Run(map[bool]string{false: "delivered", true: "unavailable"}[fail], func(t *testing.T) {
+	for _, mode := range []string{"delivered", "unavailable", "missing cleanup"} {
+		fail := mode != "delivered"
+		t.Run(mode, func(t *testing.T) {
 			server, client := net.Pipe()
 			defer func() { _ = server.Close(); _ = client.Close() }()
 
@@ -43,6 +46,10 @@ func TestNotificationLifecycle(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				done <- serveRequest(ctx, client, func(context.Context, Request) (func(), error) {
+					if mode == "missing cleanup" {
+						return nil, nil
+					}
+
 					if fail {
 						return nil, errors.New("no notification daemon")
 					}
@@ -87,4 +94,43 @@ func TestNotificationLifecycle(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Embed the unused interface methods; only synchronous calls are exercised.
+type stalledNotifications struct {
+	dbus.BusObject
+	stall bool
+}
+
+func (s *stalledNotifications) CallWithContext(ctx context.Context, method string, flags dbus.Flags, args ...interface{}) *dbus.Call {
+	if strings.HasSuffix(method, ".Notify") {
+		if s.stall {
+			<-ctx.Done()
+			return &dbus.Call{Err: ctx.Err()}
+		}
+
+		return &dbus.Call{Body: []interface{}{uint32(42)}}
+	}
+
+	return &dbus.Call{}
+}
+
+func TestDesktopTimeoutAndRecovery(t *testing.T) {
+	lifetime, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	obj := &stalledNotifications{stall: true}
+	request := Request{RP: "example.com", Action: "authenticate"}
+	cleanup, err := showDesktop(lifetime, lifetime, obj, request, 10*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) || cleanup != nil || lifetime.Err() != nil {
+		t.Fatalf("Notify did not time out independently: cleanup=%v err=%v lifetime=%v", cleanup != nil, err, lifetime.Err())
+	}
+
+	obj.stall = false
+	cleanup, err = showDesktop(lifetime, lifetime, obj, request, 10*time.Millisecond)
+	if err != nil || cleanup == nil {
+		t.Fatal("helper did not recover", err)
+	}
+
+	cleanup()
 }

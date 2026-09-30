@@ -125,7 +125,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	defer broker.Close()
 
 	a, err := authenticator.Open(authenticator.Config{
-		StateDir: *dir, Signer: backend, Session: checkSession, Logger: logger,
+		StateDir: *dir, Signer: backend, Session: checkSession, Logger: log.Default(), DebugLogger: logger,
 		Verify: func(ctx context.Context) error { return fingerprint.Verify(ctx, *owner) },
 		Notify: broker.Show,
 	})

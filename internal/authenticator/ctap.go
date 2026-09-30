@@ -10,6 +10,8 @@ import (
 	"math/big"
 	"sync"
 
+	"cv2-fido/internal/rpid"
+
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -29,6 +31,7 @@ type Authenticator struct {
 	verify  func(context.Context) error
 	notify  func(context.Context, string, string) (func(), error)
 	session func(context.Context) (string, error)
+	logger  *log.Logger
 	debug   *log.Logger
 }
 
@@ -57,7 +60,6 @@ type makeRequest struct {
 	Options     map[string]bool `cbor:"7,keyasint"`
 	PIN         []byte          `cbor:"8,keyasint"`
 	PINProtocol uint            `cbor:"9,keyasint"`
-	Enterprise  uint            `cbor:"10,keyasint"`
 }
 type assertionRequest struct {
 	RP          string          `cbor:"1,keyasint"`
@@ -138,22 +140,44 @@ func (a *Authenticator) HandleCommand(ctx context.Context, cmd byte, data []byte
 			return statusInvalidLength, nil
 		}
 
-		return response(map[int]any{
+		return a.response(map[int]any{
 			infoVersions: []string{"FIDO_2_0"}, infoAAGUID: aaguid,
 			infoOptions:    map[string]bool{"rk": true, "up": true, "uv": true, "plat": false},
 			infoMaxMsgSize: maxMessage,
 		})
 	case cmdMakeCredential:
 		var req makeRequest
-		if len(data) == 0 || data[0]>>cborMajorTypeShift != cborMajorTypeMap || decode.Unmarshal(data, &req) != nil {
-			return statusInvalidCBOR, nil
+		fields, status := decodeRequest(data, map[int]any{
+			makeClientDataHash: &req.Hash, makePubKeyCredParams: &req.Algorithms,
+			makeExcludeList: &req.Exclude, makeOptions: &req.Options,
+			makePINAuth: &req.PIN, makePINProtocol: &req.PINProtocol,
+		}, makeClientDataHash, makeRP, makeUser, makePubKeyCredParams)
+		if status != statusOK {
+			return status, nil
+		}
+
+		if _, status := decodeRequest(fields[makeRP], map[string]any{"id": &req.RP.ID}, "id"); status != statusOK {
+			return status, nil
+		}
+
+		if _, status := decodeRequest(fields[makeUser], map[string]any{"id": &req.User.ID}, "id"); status != statusOK {
+			return status, nil
+		}
+
+		// Recognize the CTAP 2.1 parameter but never provide enterprise attestation.
+		if _, present := fields[makeEnterpriseAttestation]; present {
+			return statusInvalidParameter, nil
 		}
 
 		return a.makeCredential(ctx, req)
 	case cmdGetAssertion:
 		var req assertionRequest
-		if len(data) == 0 || data[0]>>cborMajorTypeShift != cborMajorTypeMap || decode.Unmarshal(data, &req) != nil {
-			return statusInvalidCBOR, nil
+		if _, status := decodeRequest(data, map[int]any{
+			assertionRPID: &req.RP, assertionClientDataHash: &req.Hash,
+			assertionAllowList: &req.Allow, assertionOptions: &req.Options,
+			assertionPINAuth: &req.PIN, assertionPINProtocol: &req.PINProtocol,
+		}, assertionRPID, assertionClientDataHash); status != statusOK {
+			return status, nil
 		}
 
 		return a.getAssertion(ctx, req)
@@ -162,15 +186,49 @@ func (a *Authenticator) HandleCommand(ctx context.Context, cmd byte, data []byte
 	}
 }
 
+func (a *Authenticator) invalidParameter(reason string) (byte, []byte) {
+	a.trace("invalid request: %s", reason)
+	return statusInvalidParameter, nil
+}
+
 func (a *Authenticator) trace(format string, args ...any) {
 	if a.debug != nil {
 		a.debug.Printf(format, args...)
 	}
 }
 
-func response(value any) (byte, []byte) {
+// Check presence separately from decoded zero values (empty strings/arrays).
+func decodeRequest[K comparable](data []byte, targets map[K]any, required ...K) (map[K]cbor.RawMessage, byte) {
+	var fields map[K]cbor.RawMessage
+	if len(data) == 0 || data[0]>>cborMajorTypeShift != cborMajorTypeMap {
+		return nil, statusInvalidCBOR
+	}
+
+	if err := decode.Unmarshal(data, &fields); err != nil {
+		return nil, statusInvalidCBOR
+	}
+
+	for key, target := range targets {
+		if raw, present := fields[key]; present {
+			if err := decode.Unmarshal(raw, target); err != nil {
+				return nil, statusInvalidCBOR
+			}
+		}
+	}
+
+	for _, key := range required {
+		if _, ok := fields[key]; !ok {
+			return nil, statusMissingParameter
+		}
+	}
+
+	return fields, statusOK
+}
+
+func (a *Authenticator) response(value any) (byte, []byte) {
 	out, err := encode.Marshal(value)
 	if err != nil {
+		a.logger.Printf("encode CTAP response: %v", err)
 		return statusOther, nil
 	}
 
@@ -203,7 +261,12 @@ func (a *Authenticator) authorize(ctx context.Context, rp, action string) byte {
 
 	closeNotification, err := a.notify(ctx, rp, action)
 	if err != nil {
-		log.Printf("notification: %v", err)
+		a.logger.Printf("notification: %v", err)
+		return statusOperationDenied
+	}
+
+	if closeNotification == nil {
+		a.logger.Printf("notification: missing cleanup callback")
 		return statusOperationDenied
 	}
 
@@ -217,14 +280,14 @@ func (a *Authenticator) authorize(ctx context.Context, rp, action string) byte {
 		return statusOperationDenied
 	}
 
-	log.Printf("%s for %q: touch the fingerprint reader", action, rp)
+	a.logger.Printf("%s for %q: touch the fingerprint reader", action, rp)
 	err = a.verify(ctx)
 	if ctx.Err() != nil {
 		return contextStatus(ctx)
 	}
 
 	if err != nil {
-		log.Printf("fingerprint: %v", err)
+		a.logger.Printf("fingerprint: %v", err)
 		return statusOperationDenied
 	}
 
@@ -258,16 +321,24 @@ func (a *Authenticator) checkSession(ctx context.Context) error {
 
 func (a *Authenticator) makeCredential(ctx context.Context, r makeRequest) (byte, []byte) {
 	a.trace("makeCredential rp=%q exclude=%d rk=%t uv=%t", r.RP.ID, len(r.Exclude), r.Options["rk"], r.Options["uv"])
-	if len(r.Hash) != sha256.Size || r.RP.ID == "" || len(r.RP.ID) > maxRPIDSize || len(r.User.ID) == 0 || len(r.User.ID) > maxUserIDSize || len(r.Exclude) > maxCredentialList {
-		return statusInvalidParameter, nil
+	if len(r.Hash) != sha256.Size {
+		return a.invalidParameter("clientDataHash must contain 32 bytes")
+	}
+
+	if err := rpid.Validate(r.RP.ID); err != nil {
+		return a.invalidParameter(err.Error())
+	}
+
+	if len(r.User.ID) == 0 || len(r.User.ID) > maxUserIDSize {
+		return a.invalidParameter("user ID length is outside supported limits")
+	}
+
+	if len(r.Exclude) > maxCredentialList {
+		return a.invalidParameter("excludeList exceeds supported limit")
 	}
 
 	if r.PIN != nil || r.PINProtocol != 0 {
 		return statusPINAuthInvalid, nil
-	}
-
-	if r.Enterprise != 0 {
-		return statusUnsupportedOption, nil
 	}
 
 	if _, ok := r.Options["up"]; ok {
@@ -285,6 +356,10 @@ func (a *Authenticator) makeCredential(ctx context.Context, r makeRequest) (byte
 		return statusUnsupportedAlgorithm, nil
 	}
 
+	if len(a.store.credentials) >= maxCredentials {
+		return statusKeyStoreFull, nil
+	}
+
 	if status := a.authorize(ctx, r.RP.ID, "register"); status != statusOK {
 		return status, nil
 	}
@@ -295,10 +370,7 @@ func (a *Authenticator) makeCredential(ctx context.Context, r makeRequest) (byte
 		}
 	}
 
-	if len(a.store.credentials) >= maxCredentials {
-		return statusKeyStoreFull, nil
-	}
-
+	// Keep RP-specific failures behind authorization to avoid credential discovery.
 	if r.Options["rk"] {
 		for _, c := range a.store.credentials {
 			if c.Resident && c.RP == r.RP.ID {
@@ -310,7 +382,7 @@ func (a *Authenticator) makeCredential(ctx context.Context, r makeRequest) (byte
 	rpHash := sha256.Sum256([]byte(r.RP.ID))
 	key, x, y, err := a.signer.RegisterKey(rpHash[:])
 	if err != nil {
-		log.Printf("create TPM key: %v", err)
+		a.logger.Printf("create TPM key: %v", err)
 		return statusOther, nil
 	}
 
@@ -333,6 +405,7 @@ func (a *Authenticator) makeCredential(ctx context.Context, r makeRequest) (byte
 		coseY: y.FillBytes(make([]byte, p256CoordinateSize)),
 	})
 	if err != nil {
+		a.logger.Printf("encode COSE public key: %v", err)
 		return statusOther, nil
 	}
 
@@ -344,7 +417,7 @@ func (a *Authenticator) makeCredential(ctx context.Context, r makeRequest) (byte
 	digest := sha256.Sum256(append(append([]byte(nil), authData...), r.Hash...))
 	sig, err := a.signer.SignASN1(key, rpHash[:], digest[:])
 	if err != nil {
-		log.Printf("self attestation: %v", err)
+		a.logger.Printf("self attestation: %v", err)
 		return statusOther, nil
 	}
 
@@ -352,7 +425,7 @@ func (a *Authenticator) makeCredential(ctx context.Context, r makeRequest) (byte
 		return contextStatus(ctx), nil
 	}
 
-	status, out := response(map[int]any{makeFormat: "packed", makeAuthData: authData, makeAttStatement: map[string]any{"alg": coseES256, "sig": sig}})
+	status, out := a.response(map[int]any{makeFormat: "packed", makeAuthData: authData, makeAttStatement: map[string]any{"alg": coseES256, "sig": sig}})
 	if status != statusOK {
 		return status, nil
 	}
@@ -362,7 +435,7 @@ func (a *Authenticator) makeCredential(ctx context.Context, r makeRequest) (byte
 	}
 
 	if err := a.store.save(credential{ID: id, RP: r.RP.ID, User: r.User.ID, Key: key, Resident: r.Options["rk"]}); err != nil {
-		log.Printf("save credential: %v", err)
+		a.logger.Printf("save credential: %v", err)
 		return statusOther, nil
 	}
 
@@ -374,8 +447,16 @@ func (a *Authenticator) makeCredential(ctx context.Context, r makeRequest) (byte
 }
 
 func (a *Authenticator) getAssertion(ctx context.Context, r assertionRequest) (byte, []byte) {
-	if len(r.Hash) != sha256.Size || r.RP == "" || len(r.RP) > maxRPIDSize || len(r.Allow) > maxCredentialList {
-		return statusInvalidParameter, nil
+	if len(r.Hash) != sha256.Size {
+		return a.invalidParameter("clientDataHash must contain 32 bytes")
+	}
+
+	if err := rpid.Validate(r.RP); err != nil {
+		return a.invalidParameter(err.Error())
+	}
+
+	if len(r.Allow) > maxCredentialList {
+		return a.invalidParameter("allowList exceeds supported limit")
 	}
 
 	if r.PIN != nil || r.PINProtocol != 0 {
@@ -443,7 +524,7 @@ func (a *Authenticator) getAssertion(ctx context.Context, r assertionRequest) (b
 	digest := sha256.Sum256(append(append([]byte(nil), authData...), r.Hash...))
 	sig, err := a.signer.SignASN1(c.Key, rpHash[:], digest[:])
 	if err != nil {
-		log.Printf("TPM assertion: %v", err)
+		a.logger.Printf("TPM assertion: %v", err)
 		return statusOther, nil
 	}
 
@@ -457,7 +538,7 @@ func (a *Authenticator) getAssertion(ctx context.Context, r assertionRequest) (b
 		result[assertionUser] = userEntity{ID: c.User}
 	}
 
-	return response(result)
+	return a.response(result)
 }
 
 func authenticatorData(rp [sha256.Size]byte, flags byte) []byte {

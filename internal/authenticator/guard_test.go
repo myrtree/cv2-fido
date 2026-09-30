@@ -108,3 +108,12 @@ func TestNotificationAndPromptGuard(t *testing.T) {
 		t.Fatal("preflight consumed a prompt or fingerprint")
 	}
 }
+
+func TestNotificationMissingCleanupDeniesScan(t *testing.T) {
+	a, _, scans := testAuthenticator(t)
+	a.notify = func(context.Context, string, string) (func(), error) { return nil, nil }
+	status, _ := invoke(t, a, 1, registration())
+	if status != 0x27 || *scans != 0 {
+		t.Fatalf("invalid notification callback allowed scanning: %x, scans=%d", status, *scans)
+	}
+}

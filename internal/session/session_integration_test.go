@@ -5,10 +5,12 @@ package session
 import (
 	"bufio"
 	"context"
-	"github.com/godbus/dbus/v5"
+	"fmt"
 	"os/exec"
 	"testing"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 // Each test owns a private bus. No request reaches host logind or fprintd.
@@ -114,6 +116,85 @@ func TestLogindIntegration(t *testing.T) {
 
 			if _, err := Active(context.Background(), conn, 1000); err == nil {
 				t.Fatal("missing logind accepted")
+			}
+		})
+	}
+}
+
+func TestStableSessionSelection(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprint(reverse), func(t *testing.T) {
+			conn := testSystemBus(t)
+			if _, err := conn.RequestName("org.freedesktop.login1", dbus.NameFlagDoNotQueue); err != nil {
+				t.Fatal(err)
+			}
+
+			first := testLoginSession{ID: "a", UID: 1000, Seat: "seat0", Path: "/org/freedesktop/login1/session/a"}
+			second := first
+			second.ID, second.Path = "b", "/org/freedesktop/login1/session/b"
+			sessions := []testLoginSession{first, second}
+			if reverse {
+				sessions[0], sessions[1] = sessions[1], sessions[0]
+			}
+
+			if err := conn.Export(&testLoginManager{Sessions: sessions}, "/org/freedesktop/login1", "org.freedesktop.login1.Manager"); err != nil {
+				t.Fatal(err)
+			}
+
+			props := &testSessionProperties{Values: map[string]dbus.Variant{
+				"Active": dbus.MakeVariant(true), "Remote": dbus.MakeVariant(false), "LockedHint": dbus.MakeVariant(false), "Type": dbus.MakeVariant("wayland"), "Class": dbus.MakeVariant("user"),
+			}}
+			for _, s := range sessions {
+				if err := conn.Export(props, s.Path, "org.freedesktop.DBus.Properties"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := Active(context.Background(), conn, 1000)
+			if err != nil || got != string(first.Path) {
+				t.Fatalf("unstable selection: %q %v", got, err)
+			}
+		})
+	}
+}
+
+type failedSessionProperties struct{ Name string }
+
+func (p *failedSessionProperties) GetAll(string) (map[string]dbus.Variant, *dbus.Error) {
+	return nil, dbus.NewError(p.Name, []interface{}{"session unavailable"})
+}
+
+func TestSessionLookupErrors(t *testing.T) {
+	for _, name := range []string{"org.freedesktop.DBus.Error.UnknownObject", "org.freedesktop.login1.NoSuchSession", "org.freedesktop.DBus.Error.AccessDenied"} {
+		t.Run(name, func(t *testing.T) {
+			conn := testSystemBus(t)
+			if _, err := conn.RequestName("org.freedesktop.login1", dbus.NameFlagDoNotQueue); err != nil {
+				t.Fatal(err)
+			}
+
+			sessions := []testLoginSession{{ID: "a", UID: 1000, Seat: "seat0", Path: "/session/a"}, {ID: "b", UID: 1000, Seat: "seat0", Path: "/session/b"}}
+			if err := conn.Export(&testLoginManager{Sessions: sessions}, "/org/freedesktop/login1", "org.freedesktop.login1.Manager"); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := conn.Export(&failedSessionProperties{Name: name}, sessions[0].Path, "org.freedesktop.DBus.Properties"); err != nil {
+				t.Fatal(err)
+			}
+
+			props := &testSessionProperties{Values: map[string]dbus.Variant{
+				"Active": dbus.MakeVariant(true), "Remote": dbus.MakeVariant(false), "LockedHint": dbus.MakeVariant(false), "Type": dbus.MakeVariant("wayland"), "Class": dbus.MakeVariant("user"),
+			}}
+			if err := conn.Export(props, sessions[1].Path, "org.freedesktop.DBus.Properties"); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := Active(context.Background(), conn, 1000)
+			if name != "org.freedesktop.DBus.Error.AccessDenied" {
+				if err != nil || got != string(sessions[1].Path) {
+					t.Fatal("vanished session prevented selection", err)
+				}
+			} else if err == nil {
+				t.Fatal("unexpected session error ignored")
 			}
 		})
 	}

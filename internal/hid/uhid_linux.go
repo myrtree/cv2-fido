@@ -83,6 +83,32 @@ func outputReport(body []byte) ([]byte, error) {
 	return body[:size], nil
 }
 
+// Malformed client reports must not tear down the virtual device. Return to
+// the event loop so queued results and keepalives are still serviced.
+func (h *hidTransport) receiveOutput(ctx context.Context, body []byte) {
+	p, err := outputReport(body)
+	if err != nil {
+		if h.debug != nil {
+			h.debug.Printf("discard UHID_OUTPUT: %v", err)
+		}
+
+		return
+	}
+
+	h.receive(ctx, p)
+}
+
+// eventfd wakes poll when a worker publishes its result. os.File keeps a late
+// worker write safe if Run has already closed the descriptor during shutdown.
+func resultWakeup() (*os.File, error) {
+	fd, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.NewFile(uintptr(fd), "HID result wakeup"), nil
+}
+
 // Run exposes a virtual FIDO HID device until cancellation or an I/O error.
 func Run(ctx context.Context, handle func(context.Context, byte, []byte) (byte, []byte), logger *log.Logger) error {
 	fd, err := unix.Open("/dev/uhid", unix.O_RDWR|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
@@ -114,6 +140,18 @@ func Run(ctx context.Context, handle func(context.Context, byte, []byte) (byte, 
 		copy(input[uhidInputDataOffset:], report)
 		return writeUHID(f, input)
 	}, handle)
+	wakeup, err := resultWakeup()
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = wakeup.Close() }()
+	h.wake = func() {
+		var value [8]byte
+		binary.NativeEndian.PutUint64(value[:], 1)
+		_, _ = wakeup.Write(value[:]) // Shutdown may close it before the worker returns.
+	}
+
 	h.debug = logger
 	defer func() {
 		if h.job != nil {
@@ -121,7 +159,7 @@ func Run(ctx context.Context, handle func(context.Context, byte, []byte) (byte, 
 		}
 	}()
 
-	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}, {Fd: int32(wakeup.Fd()), Events: unix.POLLIN}}
 	lastTick := time.Now()
 	for {
 		if err := ctx.Err(); err != nil {
@@ -133,7 +171,7 @@ func Run(ctx context.Context, handle func(context.Context, byte, []byte) (byte, 
 			return err
 		}
 
-		if n > 0 {
+		if n > 0 && poll[0].Revents != 0 {
 			if poll[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
 				return errors.New("UHID disconnected")
 			}
@@ -154,12 +192,7 @@ func Run(ctx context.Context, handle func(context.Context, byte, []byte) (byte, 
 
 			switch binary.NativeEndian.Uint32(buf) {
 			case uhidOutput:
-				p, err := outputReport(buf[uhidEventTypeSize:n])
-				if err != nil {
-					return err
-				}
-
-				h.receive(ctx, p)
+				h.receiveOutput(ctx, buf[uhidEventTypeSize:n])
 			case uhidGetReport, uhidSetReport: // GET_REPORT/SET_REPORT: control transfers are unsupported.
 				if n < uhidControlIDEnd {
 					return errors.New("short UHID control request")
@@ -177,6 +210,19 @@ func Run(ctx context.Context, handle func(context.Context, byte, []byte) (byte, 
 				if err := writeUHID(f, reply); err != nil {
 					return err
 				}
+			}
+		}
+
+		if n > 0 && poll[1].Revents&unix.POLLIN != 0 {
+			var value [8]byte
+			if _, err := wakeup.Read(value[:]); err != nil {
+				return err
+			}
+
+			select {
+			case result := <-h.results:
+				h.finish(result)
+			default: // A periodic tick may already have handled this result.
 			}
 		}
 

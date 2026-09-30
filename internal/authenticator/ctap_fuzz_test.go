@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log"
 	"math/big"
 	"testing"
 
@@ -93,6 +94,7 @@ func FuzzCTAPAuthorization(f *testing.F) {
 			}
 		}
 		a := &Authenticator{
+			logger: log.Default(),
 			notify: testNotify,
 			store:  &store{credentials: []credential{{ID: id, RP: "example.com", User: []byte{1}, Key: []byte{1}, Resident: true}}},
 			signer: fuzzSigner{

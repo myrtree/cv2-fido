@@ -120,18 +120,9 @@ func openStore(dir string) (*store, error) {
 		return nil, errors.New("unsupported or oversized credential store")
 	}
 
-	ids := make(map[string]bool)
-	residents := make(map[string]bool)
-	for _, c := range state.Credentials {
-		if len(c.ID) != credentialIDSize || c.RP == "" || len(c.User) == 0 || len(c.User) > maxUserIDSize || len(c.Key) == 0 || len(c.Key) > maxWrappedKeySize || ids[string(c.ID)] || (c.Resident && residents[c.RP]) {
-			_ = s.Close()
-			return nil, errors.New("invalid or duplicate credential")
-		}
-
-		ids[string(c.ID)] = true
-		if c.Resident {
-			residents[c.RP] = true
-		}
+	if err := validateCredentials(state.Credentials); err != nil {
+		_ = s.Close()
+		return nil, err
 	}
 
 	s.credentials = state.Credentials
@@ -163,6 +154,10 @@ func (s *store) saveWithSync(c credential, syncDir func(*os.File) error) error {
 	}
 
 	next := append(append([]credential(nil), s.credentials...), c)
+	if err := validateCredentials(next); err != nil {
+		return err
+	}
+
 	data, err := json.Marshal(diskState{Version: storeVersion, Credentials: next})
 	if err != nil {
 		return err
@@ -205,5 +200,42 @@ func (s *store) saveWithSync(c credential, syncDir func(*os.File) error) error {
 	}
 
 	s.credentials = next
+	return nil
+}
+
+func validateCredentials(credentials []credential) error {
+	if len(credentials) > maxCredentials {
+		return errors.New("credential store is full")
+	}
+
+	ids := make(map[string]bool)
+	residents := make(map[string]bool)
+	for i, c := range credentials {
+		var reason string
+		switch {
+		case len(c.ID) != credentialIDSize:
+			reason = "invalid credential ID length"
+		case c.RP == "" || len(c.RP) > maxRPIDSize:
+			reason = "invalid RP ID length"
+		case len(c.User) == 0 || len(c.User) > maxUserIDSize:
+			reason = "invalid user ID length"
+		case len(c.Key) == 0 || len(c.Key) > maxWrappedKeySize:
+			reason = "invalid wrapped key length"
+		case ids[string(c.ID)]:
+			reason = "duplicate credential ID"
+		case c.Resident && residents[c.RP]:
+			reason = "duplicate resident credential for RP"
+		}
+
+		if reason != "" {
+			return fmt.Errorf("credential %d: %s", i, reason)
+		}
+
+		ids[string(c.ID)] = true
+		if c.Resident {
+			residents[c.RP] = true
+		}
+	}
+
 	return nil
 }

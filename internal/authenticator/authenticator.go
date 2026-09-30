@@ -11,16 +11,18 @@ import (
 // eligible session identity or an error. Neither result is cached across requests.
 // Notify must deliver the RP/action notification and return its cleanup function.
 type Config struct {
-	StateDir string
-	Signer   Signer
-	Verify   func(context.Context) error
-	Notify   func(context.Context, string, string) (func(), error)
-	Session  func(context.Context) (string, error)
-	Logger   *log.Logger
+	StateDir    string
+	Signer      Signer
+	Verify      func(context.Context) error
+	Notify      func(context.Context, string, string) (func(), error)
+	Session     func(context.Context) (string, error)
+	Logger      *log.Logger
+	DebugLogger *log.Logger
 }
 
 // Open exclusively locks and loads the credential store. Call Close after all
-// requests have stopped. A nil Logger disables request diagnostics.
+// requests have stopped. Logger defaults to log.Default; a nil DebugLogger
+// disables request diagnostics.
 func Open(config Config) (*Authenticator, error) {
 	if config.Signer == nil || config.Verify == nil || config.Session == nil || config.Notify == nil {
 		return nil, errors.New("signer, notification, fingerprint verification and session check are required")
@@ -31,9 +33,14 @@ func Open(config Config) (*Authenticator, error) {
 		return nil, err
 	}
 
+	logger := config.Logger
+	if logger == nil {
+		logger = log.Default()
+	}
+
 	return &Authenticator{
 		signer: config.Signer, store: state, verify: config.Verify,
-		session: config.Session, notify: config.Notify, debug: config.Logger,
+		session: config.Session, notify: config.Notify, logger: logger, debug: config.DebugLogger,
 	}, nil
 }
 

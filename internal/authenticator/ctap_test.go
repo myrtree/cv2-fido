@@ -61,6 +61,7 @@ func testAuthenticator(t *testing.T) (*Authenticator, *testSigner, *int) {
 	signer := &testSigner{keys: make(map[string]*ecdsa.PrivateKey), rps: make(map[string]string)}
 	checks := new(int)
 	a := &Authenticator{
+		logger: log.Default(),
 		notify: testNotify,
 		store:  s, signer: signer, verify: func(context.Context) error { *checks++; return nil },
 		session: func(context.Context) (string, error) { return "test-session", nil },
@@ -488,3 +489,146 @@ func TestPreflightRejectsUnknownAndCrossRPCredentials(t *testing.T) {
 }
 
 func testNotify(context.Context, string, string) (func(), error) { return func() {}, nil }
+
+func TestRequiredParameters(t *testing.T) {
+	for _, cmd := range []byte{cmdMakeCredential, cmdGetAssertion} {
+		required := []int{1, 2}
+		if cmd == cmdMakeCredential {
+			required = []int{1, 2, 3, 4}
+		}
+
+		for _, key := range required {
+			a, _, scans := testAuthenticator(t)
+			req := registration()
+			if cmd == cmdGetAssertion {
+				req = map[int]any{1: "example.com", 2: make([]byte, 32)}
+			}
+
+			delete(req, key)
+			status, _ := invoke(t, a, cmd, req)
+			if status != 0x14 || *scans != 0 {
+				t.Fatalf("cmd=%x missing=%d status=%x scans=%d", cmd, key, status, *scans)
+			}
+		}
+	}
+
+	for _, key := range []int{2, 3} {
+		a, _, _ := testAuthenticator(t)
+		req := registration()
+		req[key] = map[string]any{}
+		if status, _ := invoke(t, a, cmdMakeCredential, req); status != 0x14 {
+			t.Fatalf("missing entity id: %x", status)
+		}
+	}
+
+	a, _, _ := testAuthenticator(t)
+	req := registration()
+	req[1] = []byte{}
+	if status, _ := invoke(t, a, cmdMakeCredential, req); status != statusInvalidParameter {
+		t.Fatalf("empty hash confused with absent: %x", status)
+	}
+}
+
+func TestEnterpriseAttestationRejected(t *testing.T) {
+	for _, value := range []any{uint(0), uint(1), uint(2), nil} {
+		a, _, scans := testAuthenticator(t)
+		req := registration()
+		req[10] = value
+		if status, _ := invoke(t, a, cmdMakeCredential, req); status != statusInvalidParameter || *scans != 0 {
+			t.Fatalf("enterprise=%v status=%x scans=%d", value, status, *scans)
+		}
+	}
+}
+
+func TestInvalidRPDoesNotSpendPromptBudget(t *testing.T) {
+	for _, cmd := range []byte{cmdMakeCredential, cmdGetAssertion} {
+		a, _, scans := testAuthenticator(t)
+		a.guard.clock = func() time.Time { return time.Unix(100, 0) }
+		req := registration()
+		if cmd == cmdMakeCredential {
+			req[2] = map[string]any{"id": "bad/name"}
+		} else {
+			req = map[int]any{1: "bad/name", 2: make([]byte, 32), 3: []map[string]any{{"type": "public-key", "id": []byte{1}}}, 5: map[string]bool{"up": false}}
+		}
+
+		if status, _ := invoke(t, a, cmd, req); status != statusInvalidParameter {
+			t.Fatalf("invalid RP status=%x", status)
+		}
+
+		if a.guard.prompts.initialized || !a.guard.blockedUntil.IsZero() || *scans != 0 {
+			t.Fatal("invalid RP spent prompt budget")
+		}
+
+		if a.guard.requests.tokens != requestBurst-1 {
+			t.Fatal("invalid request escaped request budget")
+		}
+
+		if status, _ := invoke(t, a, cmdMakeCredential, registration()); status != statusOK {
+			t.Fatalf("valid request blocked: %x", status)
+		}
+	}
+}
+
+func TestResponseErrorUsesConfiguredLogger(t *testing.T) {
+	var output bytes.Buffer
+	a := &Authenticator{logger: log.New(&output, "", 0)}
+	status, data := a.response(func() {})
+	if status != statusOther || len(data) != 0 {
+		t.Fatal("invalid marshal response")
+	}
+
+	if !strings.Contains(output.String(), "encode CTAP response:") {
+		t.Fatal("missing error diagnostic")
+	}
+}
+
+func TestRequestFieldTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   int
+		value any
+		want  byte
+	}{
+		{"hash type", 1, "hash", statusInvalidCBOR},
+		{"rp type", 2, "example.com", statusInvalidCBOR},
+		{"rp null", 2, nil, statusInvalidCBOR},
+		{"rp id type", 2, map[string]any{"id": 7}, statusInvalidCBOR},
+		{"user id type", 3, map[string]any{"id": "user"}, statusInvalidCBOR},
+		{"options type", 7, true, statusInvalidCBOR},
+		{"pin protocol type", 9, "one", statusInvalidCBOR},
+		{"unknown field", 42, map[string]any{"future": true}, statusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _, scans := testAuthenticator(t)
+			req := registration()
+			req[tc.key] = tc.value
+			status, _ := invoke(t, a, cmdMakeCredential, req)
+			if status != tc.want {
+				t.Fatalf("status=%x want=%x", status, tc.want)
+			}
+
+			if status != statusOK && *scans != 0 {
+				t.Fatal("invalid request prompted for a fingerprint")
+			}
+		})
+	}
+}
+
+func TestFullStoreDoesNotPrompt(t *testing.T) {
+	a, signer, scans := testAuthenticator(t)
+	a.store.credentials = make([]credential, maxCredentials)
+	status, _ := invoke(t, a, cmdMakeCredential, registration())
+	if status != statusKeyStoreFull || *scans != 0 || signer.signs != 0 || a.guard.prompts.initialized {
+		t.Fatalf("full store: status=%x scans=%d signs=%d", status, *scans, signer.signs)
+	}
+}
+
+func TestResidentLimitRequiresAuthorization(t *testing.T) {
+	a, _, scans := testAuthenticator(t)
+	a.store.credentials = []credential{{RP: "example.com", Resident: true}}
+	a.verify = func(context.Context) error { *scans++; return errors.New("denied") }
+	status, _ := invoke(t, a, cmdMakeCredential, registration())
+	if status != statusOperationDenied || *scans != 1 {
+		t.Fatalf("resident existence exposed: status=%x scans=%d", status, *scans)
+	}
+}

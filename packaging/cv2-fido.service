@@ -3,6 +3,9 @@ Description=Fingerprint FIDO2 authenticator
 After=systemd-udevd.service fprintd.service
 Wants=systemd-udevd.service
 
+StartLimitIntervalSec=5min
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=cv2-fido
@@ -16,6 +19,7 @@ RuntimeDirectoryMode=0755
 UMask=0077
 Restart=on-failure
 RestartSec=5s
+RestartPreventExitStatus=78
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -25,12 +29,19 @@ DeviceAllow=/dev/uhid rw
 ProtectHome=yes
 ProtectSystem=strict
 PrivateTmp=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProcSubset=pid
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX
 IPAddressDeny=any
 LockPersonality=yes

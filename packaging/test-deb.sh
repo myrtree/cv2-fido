@@ -40,13 +40,20 @@ grep -qx '/etc/cv2-fido.conf' "$tmp/control/conffiles"
 test ! -e "$tmp/root/var/lib/cv2-fido"
 test ! -e "$tmp/root/home"
 
+# An unconfigured install must exit with the status excluded from restarts.
+status=0
+CV2_FIDO_USER= "$tmp/root/usr/bin/cv2-fido" run > "$tmp/unconfigured.log" 2>&1 || status=$?
+test "$status" -eq 78
 unit="$tmp/root/usr/lib/systemd/system/cv2-fido.service"
+grep -Fxq 'RestartPreventExitStatus=78' "$unit"
+grep -Fxq 'StartLimitIntervalSec=5min' "$unit"
+grep -Fxq 'StartLimitBurst=5' "$unit"
 # Verify against the extracted executable; no installed service is required.
 mkdir "$tmp/verify"
 sed "s@ExecStart=/usr/bin/cv2-fido@ExecStart=$tmp/root/usr/bin/cv2-fido@" \
     "$unit" > "$tmp/verify/cv2-fido.service"
 systemd-analyze verify "$tmp/verify/cv2-fido.service"
-for setting in 'User=cv2-fido' 'Group=cv2-fido' 'EnvironmentFile=/etc/cv2-fido.conf' 'StateDirectory=cv2-fido' 'StateDirectoryMode=0700' 'DevicePolicy=closed' 'DeviceAllow=/dev/tpmrm0 rw' 'DeviceAllow=/dev/uhid rw' 'ProtectHome=yes' 'ProtectSystem=strict' 'RestrictAddressFamilies=AF_UNIX' 'NoNewPrivileges=yes'; do
+for setting in 'User=cv2-fido' 'Group=cv2-fido' 'EnvironmentFile=/etc/cv2-fido.conf' 'StateDirectory=cv2-fido' 'StateDirectoryMode=0700' 'DevicePolicy=closed' 'DeviceAllow=/dev/tpmrm0 rw' 'DeviceAllow=/dev/uhid rw' 'ProtectHome=yes' 'ProtectSystem=strict' 'RestrictAddressFamilies=AF_UNIX' 'NoNewPrivileges=yes' 'SystemCallFilter=@system-service' 'SystemCallErrorNumber=EPERM' 'SystemCallArchitectures=native' 'ProtectProc=invisible' 'ProcSubset=pid' 'RestrictRealtime=yes' 'PrivateIPC=yes'; do
     grep -Fxq "$setting" "$unit"
 done
 grep -Fxq 'ExecStart=/usr/bin/cv2-fido run' "$unit"

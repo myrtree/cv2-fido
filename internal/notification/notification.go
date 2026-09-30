@@ -11,8 +11,14 @@ import (
 	"os"
 	"time"
 
+	"cv2-fido/internal/rpid"
+
 	"golang.org/x/sys/unix"
 )
+
+var errOwnerDenied = errors.New("notification agent is not the configured owner")
+
+const actionOwnerDenied = "owner-denied"
 
 const SocketPath = "/run/cv2-fido/notify.sock"
 
@@ -30,15 +36,8 @@ type Request struct {
 // Text uses ASCII RP IDs without markup or control characters. This is a
 // client-supplied RP ID, not an authenticated browser/process identity.
 func (r Request) Text() (string, error) {
-	if len(r.RP) == 0 || len(r.RP) > 253 {
-		return "", errors.New("invalid RP ID")
-	}
-
-	for _, c := range r.RP {
-		valid := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-'
-		if !valid {
-			return "", errors.New("RP ID must contain only ASCII hostname characters")
-		}
+	if err := rpid.Validate(r.RP); err != nil {
+		return "", err
 	}
 
 	switch r.Action {
@@ -60,6 +59,10 @@ type Broker struct {
 // Listen requires a private service-owned parent directory. The socket permits
 // connections from desktop accounts; kernel peer credentials select the owner.
 func Listen(path string, ownerUID uint32) (*Broker, error) {
+	if err := socketDirectory(path); err != nil {
+		return nil, err
+	}
+
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		return nil, err
@@ -81,6 +84,11 @@ func Listen(path string, ownerUID uint32) (*Broker, error) {
 
 			uid, err := peerUID(conn)
 			if err != nil || uid != ownerUID {
+				if err == nil {
+					_ = conn.SetWriteDeadline(time.Now().Add(agentWait))
+					_ = json.NewEncoder(conn).Encode(Request{Action: actionOwnerDenied})
+				}
+
 				_ = conn.Close()
 				continue
 			}
@@ -194,6 +202,10 @@ func ServeAgent(ctx context.Context, path string, serviceUID uint32, show func(c
 			if err == nil && uid == serviceUID {
 				err = serveRequest(ctx, client, show)
 				_ = client.Close()
+				if errors.Is(err, errOwnerDenied) {
+					return err
+				}
+
 				if err == nil {
 					continue
 				}
@@ -224,6 +236,10 @@ func serveRequest(ctx context.Context, conn net.Conn, show func(context.Context,
 		return err
 	}
 
+	if r.Action == actionOwnerDenied {
+		return errOwnerDenied
+	}
+
 	if _, err := r.Text(); err != nil {
 		return err
 	}
@@ -241,6 +257,10 @@ func serveRequest(ctx context.Context, conn net.Conn, show func(context.Context,
 	closeNotification, err := show(requestCtx, r)
 	if err != nil {
 		return err
+	}
+
+	if closeNotification == nil {
+		return errors.New("notification: missing cleanup callback")
 	}
 
 	defer closeNotification()

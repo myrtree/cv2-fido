@@ -18,6 +18,7 @@ type hidTransport struct {
 	assembly *hidAssembly
 	job      *hidJob
 	results  chan hidResult
+	wake     func()
 	err      error
 	debug    *log.Logger
 }
@@ -198,6 +199,9 @@ func (h *hidTransport) receive(ctx context.Context, p []byte) {
 		go func() {
 			status, data := h.handle(child, a.data[0], a.data[1:])
 			h.results <- hidResult{job: job, status: status, data: data}
+			if h.wake != nil {
+				h.wake()
+			}
 		}()
 	}
 }
@@ -205,7 +209,7 @@ func (h *hidTransport) receive(ctx context.Context, p []byte) {
 func (h *hidTransport) init(cid uint32, nonce []byte) {
 	assigned := cid
 	if cid == broadcastCID {
-		if len(h.channels) >= maxChannels {
+		if len(h.channels) >= maxChannels && !h.evictIdleChannel() {
 			h.failure(cid, errChannelBusy)
 			return
 		}
@@ -229,6 +233,29 @@ func (h *hidTransport) init(cid uint32, nonce []byte) {
 	out[initVersionOffset] = deviceVersionMajor
 	out[initCapabilitiesOffset] = capabilityCBOR | capabilityNoMSG
 	h.respond(cid, cmdInit, out)
+}
+
+// Channel IDs are routing identifiers, not authorization tokens. Reclaim only
+// idle channels and leave allocation to nextCID so an evicted ID is not immediately reused.
+func (h *hidTransport) evictIdleChannel() bool {
+	var oldest uint32
+	var seen time.Time
+	for cid, last := range h.channels {
+		if (h.job != nil && h.job.cid == cid) || (h.assembly != nil && h.assembly.cid == cid) {
+			continue
+		}
+
+		if oldest == 0 || last.Before(seen) || (last.Equal(seen) && cid < oldest) {
+			oldest, seen = cid, last
+		}
+	}
+
+	if oldest == 0 {
+		return false
+	}
+
+	delete(h.channels, oldest)
+	return true
 }
 
 func (h *hidTransport) finish(result hidResult) {

@@ -8,8 +8,6 @@ nix develop
 make test
 ```
 
-If the flake files are not yet tracked by Git, use `nix develop path:.`.
-
 The shell provides Go, gopls, linters, swtpm, D-Bus and deb build tools on Linux
 amd64/arm64. `flake.lock` pins the tools; update them with `nix flake update`.
 Alternatively, install Go 1.24+, make and the tools listed below.
@@ -41,13 +39,11 @@ use the deb for operation. Cross-compilation does not establish hardware support
 
 Integration tests use temporary swtpm state and private D-Bus instances, never
 host TPM/fprintd/logind or real credentials. Missing test tools fail the suite.
-See [TPM-INTEGRATION.md](TPM-INTEGRATION.md) and
-[SECURITY-TESTING.md](SECURITY-TESTING.md) for test scope.
+See [TESTING.md](TESTING.md) for test scope.
 
 ## GitHub releases
 
-The workflow expects this project at the repository root. Pushes and pull requests
-run unit, integration and package tests on native amd64 and arm64 runners, then
+Pushes and pull requests run unit, integration and package tests on native amd64 and arm64 runners, then
 save deb files as workflow artifacts.
 
 Push a tag in the form `vMAJOR.MINOR.PATCH` to publish a release. The tag supplies
