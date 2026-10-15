@@ -1,6 +1,9 @@
 package authenticator
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 const (
 	requestBurst      = 20
@@ -61,6 +64,35 @@ func (g *requestGuard) request() bool {
 func (g *requestGuard) prompt() bool {
 	now := g.now()
 	return !now.Before(g.blockedUntil) && g.prompts.take(now, promptBurst, promptInterval)
+}
+
+// waitPrompt holds the one active command until both prompt limits permit it.
+// The HID loop continues keepalives and cancellation while this worker waits.
+// Callers hold Authenticator.mu, so no other waiter can consume the budget.
+func (g *requestGuard) waitPrompt(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		now := g.now()
+		delay := max(time.Duration(0), g.blockedUntil.Sub(now))
+		if g.prompts.initialized && g.prompts.tokens == 0 {
+			delay = max(delay, g.prompts.updated.Add(promptInterval).Sub(now))
+		}
+
+		if delay <= 0 && g.prompt() {
+			return nil
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (g *requestGuard) finish(success bool) {

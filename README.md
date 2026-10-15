@@ -113,7 +113,10 @@ Reader contention, mismatch, cancellation or timeout fails the request.
 
 If the desktop helper or notification daemon is unavailable, scanning is denied.
 Failed attempts impose a cooldown of up to 30 seconds; rapid requests are also
-limited. Wait before retrying. Limits and notification behavior are described in
+limited. A retry waits for the cooldown and scan budget while keeping the browser
+request alive. Cancelling in the browser stops this wait. The original 30-second
+request timeout still applies, so a long cooldown may require another attempt.
+Limits and notification behavior are described in
 [REQUEST-GUARD.md](docs/REQUEST-GUARD.md).
 
 For request metadata, run `sudo systemctl edit cv2-fido.service` and add:

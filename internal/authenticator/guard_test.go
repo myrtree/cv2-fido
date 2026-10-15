@@ -89,8 +89,10 @@ func TestNotificationAndPromptGuard(t *testing.T) {
 		notifications++
 		return func() { closed++ }, nil
 	}
-	if status, _ := invoke(t, a, 1, registration()); status != 0x27 || notifications != 1 {
-		t.Fatal("cooldown produced another notification")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if status := a.authorize(ctx, "example.com", "register"); status != statusUserActionTimeout || notifications != 1 {
+		t.Fatal("cooldown did not wait without producing another notification")
 	}
 
 	now = now.Add(2 * time.Second)
@@ -115,5 +117,100 @@ func TestNotificationMissingCleanupDeniesScan(t *testing.T) {
 	status, _ := invoke(t, a, 1, registration())
 	if status != 0x27 || *scans != 0 {
 		t.Fatalf("invalid notification callback allowed scanning: %x, scans=%d", status, *scans)
+	}
+}
+
+func TestAuthorizationWaitsForPromptBudget(t *testing.T) {
+	for _, budget := range []string{"backoff", "prompt bucket"} {
+		t.Run(budget, func(t *testing.T) {
+			a, _, scans := testAuthenticator(t)
+			now := time.Now()
+			ready := now.Add(50 * time.Millisecond)
+			a.guard = requestGuard{}
+			if budget == "backoff" {
+				a.guard.blockedUntil = ready
+			} else {
+				a.guard.prompts = bucket{initialized: true, updated: ready.Add(-promptInterval)}
+			}
+			a.notify = func(context.Context, string, string) (func(), error) {
+				if time.Now().Before(ready) {
+					t.Error("notification started before prompt budget was available")
+				}
+				return func() {}, nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			ctx = context.WithValue(ctx, sessionContextKey{}, "test-session")
+			if status := a.authorize(ctx, "example.com", "authenticate"); status != statusOK || *scans != 1 {
+				t.Fatalf("retry did not wait and verify: status=%x scans=%d", status, *scans)
+			}
+		})
+	}
+}
+
+func TestAuthorizationWaitCancellation(t *testing.T) {
+	for _, mode := range []string{"cancel", "deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			a, _, scans := testAuthenticator(t)
+			entered := make(chan struct{}, 1)
+			a.guard = requestGuard{
+				blockedUntil: time.Now().Add(time.Hour), retryDelay: initialRetryDelay,
+				clock: func() time.Time {
+					select {
+					case entered <- struct{}{}:
+					default:
+					}
+					return time.Now()
+				},
+			}
+			before := a.guard.blockedUntil
+			notifications := 0
+			a.notify = func(context.Context, string, string) (func(), error) {
+				notifications++
+				return func() {}, nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			want := byte(statusUserActionTimeout)
+			if mode == "cancel" {
+				want = statusKeepaliveCancel
+				go func() {
+					select {
+					case <-entered:
+						cancel()
+					case <-ctx.Done():
+					}
+				}()
+			}
+			if status := a.authorize(ctx, "example.com", "authenticate"); status != want {
+				t.Fatalf("status=%x, want %x", status, want)
+			}
+			if notifications != 0 || *scans != 0 || a.guard.prompts.initialized ||
+				!a.guard.blockedUntil.Equal(before) || a.guard.retryDelay != initialRetryDelay {
+				t.Fatal("cancelled wait spent a prompt or changed the backoff")
+			}
+		})
+	}
+}
+
+func TestRetryAfterFingerprintMismatch(t *testing.T) {
+	a, _, scans := testAuthenticator(t)
+	a.guard = requestGuard{}
+	a.verify = func(context.Context) error {
+		*scans++
+		if *scans == 1 {
+			return errors.New("fingerprint mismatch")
+		}
+		return nil
+	}
+	if status, _ := invoke(t, a, cmdMakeCredential, registration()); status != statusOperationDenied {
+		t.Fatalf("mismatch status=%x", status)
+	}
+	ready := a.guard.blockedUntil
+	if status, _ := invoke(t, a, cmdMakeCredential, registration()); status != statusOK {
+		t.Fatalf("retry status=%x", status)
+	}
+	if time.Now().Before(ready) || *scans != 2 || a.guard.retryDelay != 0 {
+		t.Fatal("retry bypassed cooldown, missed fresh verification or failed to reset backoff")
 	}
 }

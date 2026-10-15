@@ -16,7 +16,14 @@ Constant-memory token buckets are accessed under the authenticator mutex:
 Silent known-ID preflight does not spend the prompt budget. Failed delivery,
 verification failure, cancellation or a session change during authorization starts
 exponential backoff: 2, 4, 8, 16, then 30 seconds. Success resets backoff, not buckets.
-Rejected attempts neither queue nor extend the cooldown. Limits are global across
+The one active authorization waits for both the cooldown and prompt budget instead
+of returning an immediate denial. The HID loop continues keepalives; browser
+cancellation and the original 30-second command deadline also bound this wait.
+Waiting neither starts a notification/scan nor extends the cooldown. Cancellation
+while waiting does not spend a prompt or increase backoff. At maximum backoff a
+request may reach its deadline before scanning; a subsequent request can retry.
+Concurrent commands and excess command traffic are still rejected, not queued.
+Limits are global across
 RPs/channels and reset on restart; they cannot ensure fairness against local malware.
 
 ## Notification bridge

@@ -248,8 +248,9 @@ func (a *Authenticator) authorize(ctx context.Context, rp, action string) byte {
 		return contextStatus(ctx)
 	}
 
-	if !a.guard.prompt() {
-		return statusOperationDenied
+	if err := a.guard.waitPrompt(ctx); err != nil {
+		a.trace("prompt wait ended: %v", err)
+		return contextStatus(ctx)
 	}
 
 	success := false
